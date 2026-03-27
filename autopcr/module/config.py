@@ -3,6 +3,8 @@ from dataclasses import dataclass
 from dataclasses_json import dataclass_json
 from ..core import pcrclient
 from ..db.database import db
+from ..model.custom import eDifficulty, UnitAttribute
+from ..model.enums import eParamType
 from ..util.pcr_data import CHARA_NAME, CHARA_NICKNAME
 from copy import copy
 
@@ -256,7 +258,7 @@ class UnitConfigMixin:
 
 class UnitChoiceConfig(UnitConfigMixin, SingleChoiceConfig):
     def __init__(self, key: str, desc: str):
-        super().__init__(key, desc, 100101, db.unlock_unit_condition)
+        super().__init__(key, desc, 100101, db.unlock_unit_condition_candidate)
 
     def process_value(self, value):
         if isinstance(value, str) and ':' in value: # Compatible with the old version
@@ -274,6 +276,20 @@ class EquipListConfig(MultiSearchConfig):
 
     def candidate_display(self, equip_id: int):
         return db.get_equip_name(equip_id)
+
+class ExEquipSubStatusConfig(SingleChoiceConfig):
+    def __init__(self, key: str, desc: str):
+        super().__init__(key, desc, 12, db.ex_equip_sub_status_candidate)
+
+    def candidate_display(self, status: int):
+        return UnitAttribute.index2ch[eParamType(status)] if status else "任意"
+
+class ExEquipSubStatusRankConfig(MultiSearchConfig):
+    def __init__(self, key: str, desc: str):
+        super().__init__(key, desc, [12, 13, 2, 4], db.ex_equip_sub_status_candidate)
+
+    def candidate_display(self, status: int):
+        return UnitAttribute.index2ch[eParamType(status)] if status else "任意"
 
 class UnitListConfig(UnitConfigMixin, MultiSearchConfig):
     def __init__(self, key: str, desc: str):
@@ -424,6 +440,16 @@ class TalentConfig(MultiChoiceConfig):
 
     def candidate_display(self, talent_id: int):
         return db.talents[talent_id].talent_name
+
+
+class AbyssBossConfig(SingleChoiceConfig):
+    """Configuration for abyss boss difficulty."""
+
+    def __init__(self, key: str, desc: str, default: int):
+        super().__init__(key, desc, default, [eDifficulty.NONE, eDifficulty.NORMAL, eDifficulty.HARD, eDifficulty.VERY_HARD, eDifficulty.EXTREME])
+
+    def candidate_display(self, difficulty: int):
+        return (eDifficulty)(difficulty).name
 
 # Compatible with the old version
 def booltype(key: str, desc: str, default: bool):

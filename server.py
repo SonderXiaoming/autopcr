@@ -1,5 +1,7 @@
 from collections import Counter
 from typing import Any, Callable, Coroutine, Dict, List, Tuple, Union
+from pathlib import Path
+import re
 
 from .autopcr.module.accountmgr import BATCHINFO, AccountBatch, TaskResultInfo
 from .autopcr.module.modulebase import eResultStatus
@@ -8,13 +10,18 @@ from .autopcr.http_server.httpserver import HttpServer
 from .autopcr.db.database import db
 from .autopcr.module.accountmgr import Account, AccountManager, instance as usermgr
 from .autopcr.db.dbstart import db_start
+from .autopcr.core.clientpool import instance as clientpool
 from .autopcr.util.draw import instance as drawer
+from .autopcr.util.excel_export import export_excel
 import asyncio, datetime
+import aiofiles
 
+from io import BytesIO
+from PIL import Image
 import nonebot
 from nonebot import on_startup
 import hoshino
-from hoshino import HoshinoBot, Service, priv
+from hoshino import HoshinoBot, Service, priv, R
 from hoshino.util import escape
 from hoshino.typing import CQEvent
 from quart_auth import QuartAuth
@@ -56,10 +63,15 @@ sv_help = f"""
 - {prefix}查纯净碎片 查询缺口纯净碎片，国服六星+日服二专需求
 - {prefix}查记忆碎片 [可刷取|大师币] 查询缺口记忆碎片，可按地图可刷取或大师币商店过滤
 - {prefix}查装备 [<rank>] [fav] 查询缺口装备，rank为数字，只查询>=rank的角色缺口装备，fav表示只查询favorite的角色
+- {prefix}查深域 查询深域通关情况
+- {prefix}查公会深域 查询公会深域通关情况
 - {prefix}刷图推荐 [<rank>] [fav] 查询缺口装备的刷图推荐，格式同上
 - {prefix}公会支援 查询公会支援角色配置
 - {prefix}卡池 查看当前卡池
 - {prefix}编队 1 1 春妈 蝶妈 狗妈 水妈 礼妈 便捷设置编队
+- {prefix}一键编队 1 1 队名1 星级角色1 星级角色2 ... 星级角色5 队名2 星级角色1 星级角色2 END 设置多队编队，队伍不足5人以END结尾
+- {prefix}半月刊 查看半月刊
+- {prefix}识图 [图片] 识别图片中的角色，返回一键编队文本
 - {prefix}免费十连 <卡池id> 卡池id来自【{prefix}卡池】
 - {prefix}来发十连 <卡池id> [抽到出] [单抽券|单抽] [编号小优先] [开抽] 赛博抽卡，谨慎使用。卡池id来自【{prefix}卡池】，[抽到出]表示抽到出货或达天井，默认十连，[单抽券]表示仅用厕纸，[单抽]表示宝石单抽，[标号小优先]指智能pickup时优先选择编号小的角色，[开抽]表示确认抽卡。已有up也可再次触发。
 """.strip()
@@ -111,9 +123,12 @@ class BotEvent:
     async def group_id(self) -> str: ...
     async def send_qq(self) -> str: ...
     async def message(self) -> List[str]: ...
+    async def message_raw(self) -> str: ...
+    async def image(self) -> List[str]: ...
     async def is_admin(self) -> bool: ...
     async def is_super_admin(self) -> bool: ...
     async def get_group_member_list(self) -> List: ...
+    async def call_action(self, *args, **kwargs) -> Dict: ...
 
 class HoshinoEvent(BotEvent):
     def __init__(self, bot: HoshinoBot, ev: CQEvent):
@@ -124,11 +139,17 @@ class HoshinoEvent(BotEvent):
 
         self.at_sb = []
         self._message = []
+        self._raw_message = ""
+        self._image = []
         for m in ev.message:
             if m.type == 'at' and m.data['qq'] != 'all':
                 self.at_sb.append(str(m.data['qq']))
-            elif m.type == 'text': # ignore other type
-                self._message += m.data['text'].split()
+            elif m.type == 'text':
+                text = m.data['text']
+                self._raw_message += text
+                self._message += text.split()
+            elif m.type == 'image':
+                self._image.append(m.data['url'])
 
     async def get_group_member_list(self) -> List[Tuple[str, str]]: # (qq, nick_name)
         members = await self.bot.get_group_member_list(group_id=self.ev.group_id)
@@ -148,6 +169,12 @@ class HoshinoEvent(BotEvent):
     async def message(self):
         return self._message
 
+    async def message_raw(self):
+        return self._raw_message
+
+    async def image(self):
+        return self._image
+
     async def send(self, msg: str):
         msg = f"[CQ:reply,id={self.ev.message_id}]{msg}"
         await self.bot.send(self.ev, msg)
@@ -163,6 +190,9 @@ class HoshinoEvent(BotEvent):
 
     async def group_id(self) -> str:
         return str(self.ev.group_id)
+
+    async def call_action(self, action: str, **kwargs) -> Dict:
+        return await self.bot.call_action(action, **kwargs)
 
 def wrap_hoshino_event(func):
     async def wrapper(bot: HoshinoBot, ev: CQEvent, *args, **kwargs):
@@ -193,21 +223,23 @@ async def check_validate(botev: BotEvent, qq: str, cnt: int = 1):
 
 async def is_valid_qq(qq: str):
     qq = str(qq)
-    groups = (await sv.get_enable_groups()).keys()
+    enable_groups = await sv.get_enable_groups()
     bot = nonebot.get_bot()
+    
     if qq.startswith("g"):
         gid = qq.lstrip('g')
-        return gid.isdigit() and int(gid) in groups
+        return gid.isdigit() and int(gid) in enable_groups.keys()
     else:
-        for group in groups:
-            try:
-                async for member in await bot.get_group_member_list(group_id=group):
-                    if qq == str(member['user_id']):
-                        return True
-            except:
-                for member in await bot.get_group_member_list(group_id=group):
-                    if qq == str(member['user_id']):
-                        return True
+        for group_id, self_ids in enable_groups.items():
+            for self_id in self_ids:
+                try:
+                    members = await bot.get_group_member_list(group_id=group_id, self_id=self_id)
+                    for member in members:
+                        if qq == str(member['user_id']):
+                            return True
+                    break
+                except Exception as e:
+                    continue
         return False
 
 def check_final_args_be_empty(func):
@@ -219,9 +251,68 @@ def check_final_args_be_empty(func):
     wrapper.__name__ = func.__name__
     return wrapper
 
+async def get_folder_id(botev: BotEvent, folder_name: str) -> Union[str, None]:
+    try:
+        gid = await botev.group_id()
+        resp = await botev.call_action('get_group_root_files', group_id=gid)
+        folders = resp.get('folders', [])
+        
+        for folder in folders:
+            if folder.get('folder_name') == folder_name:
+                folder_id = folder.get('folder_id')
+                return folder_id
+
+        await botev.send(f"本群 {gid} 未找到「{folder_name}」，尝试创建...")
+        create_resp = await botev.call_action(
+            'create_group_file_folder',
+            group_id=gid,
+            folder_name=folder_name, # napcat
+            name=folder_name # Lagrange
+        )
+        new_folder_id = create_resp.get('folder_id')
+        if not new_folder_id:
+            raise Exception("非管理员无法创建文件夹")
+        return new_folder_id
+
+    except Exception as e:
+        await botev.send(f"获取或创建「{folder_name}」文件夹失败: {e}")
+        return None
+
+async def upload_excel(botev: BotEvent, data: BytesIO, filename: str, folder_name: str):
+    excel_R = R.get('autopcr', 'excel', filename)
+    path = Path(excel_R.path)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    async with aiofiles.open(excel_R.path, 'wb') as f:
+        await f.write(data.getbuffer())
+
+    try:
+        gid = await botev.group_id()
+        folder_id = await get_folder_id(botev, folder_name)
+
+        upload_kwargs = {
+            'action': 'upload_group_file',
+            'group_id': gid,
+            'file': excel_R.url,
+            'name': filename
+        }
+        if folder_id:
+            upload_kwargs['folder'] = folder_id
+        else:
+            await botev.send(f"未能获取文件夹ID，上传到根目录")
+
+        await botev.call_action(**upload_kwargs)
+
+    finally:
+        try:
+            path.unlink()
+        except Exception as e:
+            sv.logger.warning(f"⚠️ 删除临时文件失败: {e}")
+
+
 from dataclasses import dataclass
 @dataclass
 class ToolInfo:
+    name: str
     key: str
     config_parser: Callable[..., Coroutine[Any, Any, Any]]
 
@@ -229,7 +320,7 @@ tool_info: Dict[str, ToolInfo]= {}
 
 def register_tool(name: str, key: str):
     def wrapper(func):
-        tool_info[name] = ToolInfo(key=key, config_parser=func)
+        tool_info[name] = ToolInfo(name=name, key=key, config_parser=func)
         async def inner(*args, **kwargs):
             await func(*args, **kwargs)
 
@@ -259,9 +350,15 @@ def wrap_account(func):
         msg = await botev.message()
 
         alias = msg[0] if msg else ""
+        all = False
 
         if alias == '所有':
             alias = BATCHINFO
+            all = True
+            del msg[0]
+        elif alias == '批量':
+            alias = BATCHINFO
+            all = False
             del msg[0]
         elif alias not in accmgr.accounts():
             alias = accmgr.default_account
@@ -277,8 +374,23 @@ def wrap_account(func):
             else:
                 await botev.finish(f"存在多账号且未找到默认账号，请指定昵称")
 
-        async with accmgr.load(alias) as acc:
+        async with accmgr.load(alias, force_use_all=all) as acc:
             await func(botev = botev, acc = acc, *args, **kwargs)
+
+    wrapper.__name__ = func.__name__
+    return wrapper
+
+def wrap_export(func):
+    async def wrapper(botev: BotEvent, *args, **kwargs):
+        msg = await botev.message()
+        command = msg[0] if msg else ""
+
+        export = False
+        if command.startswith("导出"):
+            msg[0] = msg[0].lstrip("导出")
+            export = True
+
+        await func(botev = botev, export = export, *args, **kwargs)
 
     wrapper.__name__ = func.__name__
     return wrapper
@@ -432,6 +544,16 @@ async def find_ghost(botev: BotEvent):
     if not msg:
         msg.append("未找到内鬼")
     await botev.finish(" ".join(msg))
+
+@sv.on_fullmatch(f"{prefix}运行状态")
+@wrap_hoshino_event
+async def service_status(botev: BotEvent):
+    sema, farm_sema = clientpool.sema_status()
+    ret = []
+    for i, (running, waiting, max_count) in enumerate([sema, farm_sema]):
+        msg = f"运行状态{i}：{running}/{max_count}正在运行，{waiting}等待中"
+        ret.append(msg)
+    await botev.send('\n'.join(ret))
 
 @sv.on_fullmatch(f"{prefix}清内鬼")
 @wrap_hoshino_event
@@ -592,19 +714,21 @@ async def config_clear_daily(botev: BotEvent):
 
 @sv.on_prefix(f"{prefix}")
 @wrap_hoshino_event
+@wrap_export
 @wrap_group
 @wrap_tool
 @wrap_accountmgr
 @wrap_account
 @wrap_config
 @check_final_args_be_empty
-async def tool_used(botev: BotEvent, tool: ToolInfo, config: Dict[str, str], acc: Union[AccountBatch, Account]):
+async def tool_used(botev: BotEvent, tool: ToolInfo, config: Dict[str, str], acc: Union[AccountBatch, Account], export: bool):
     alias = escape(acc.alias)
     try:
         loop = asyncio.get_event_loop()
         loop.create_task(check_validate(botev, acc.qq))
 
         is_admin_call = await botev.is_admin()
+        await botev.send(f"开始为{alias}执行【{tool.name}】")
         resp = await acc.do_from_key(config, tool.key, is_admin_call)
         if isinstance(resp, List):
             if resp:
@@ -613,10 +737,15 @@ async def tool_used(botev: BotEvent, tool: ToolInfo, config: Dict[str, str], acc
                 await botev.send("未选择账号！请到网页端批量运行选择账号后运行")
                 return
         resp = resp.get_result()
-        img = await drawer.draw_task_result(resp)
-        msg = f"{alias}"
-        msg += outp_b64(img)
-        await botev.send(msg)
+        if export:
+            data = await export_excel(resp.table)
+            timestamp = db.format_time_safe(datetime.datetime.now())
+            await upload_excel(botev, data, f"{tool.name}_{alias}_{timestamp}.xlsx", 'autopcr')
+        else:
+            img = await drawer.draw_task_result(resp)
+            msg = f"{alias}"
+            msg += outp_b64(img)
+            await botev.send(msg)
     except Exception as e:
         logger.exception(e)
         await botev.send(f'{alias}: {e}')
@@ -632,6 +761,15 @@ def is_args_exist(msg: List[str], key: str):
         msg.remove(key)
         return True
     return False
+
+def recover_text_by_tokens(raw_text: str, tokens: List[str]) -> str:
+    if not tokens:
+        return ""
+    pattern = r"\s+".join(re.escape(token) for token in tokens)
+    match = re.search(pattern, raw_text, flags=re.S)
+    if match:
+        return raw_text[match.start():match.end()]
+    return " ".join(tokens)
 
 @register_tool("公会支援", 'get_clan_support_unit')
 async def clan_support(botev: BotEvent):
@@ -859,6 +997,36 @@ async def find_talent_quest(botev: BotEvent):
 async def find_clan_talent_quest(botev: BotEvent):
     return {}
 
+@register_tool("查box", "get_box_table")
+async def get_box_table(botev: BotEvent):
+    msg = await botev.message()
+    box_all_unit = False
+    try:
+        box_all_unit = is_args_exist(msg, '所有')
+    except:
+        pass
+
+    known_units = []
+    unknown_units = []
+    while msg:
+        unit_name = msg[0]
+        unit = get_id_from_name(unit_name)
+        if unit:
+            known_units.append(unit * 100 + 1)
+        else:
+            unknown_units.append(unit_name)
+        del msg[0]
+    if unknown_units:
+        await botev.finish(f"未知昵称{', '.join(unknown_units)}")
+
+    if not known_units and not box_all_unit:
+        await botev.finish("请指定角色或添加【所有】参数")
+
+    return {
+        'box_unit': known_units,
+        'box_all_unit': box_all_unit
+    }
+
 @register_tool("免费十连", "free_gacha")
 async def free_gacha(botev: BotEvent):
     msg = await botev.message()
@@ -874,13 +1042,12 @@ async def free_gacha(botev: BotEvent):
     }
     return config
 
-
-@register_tool("编队", "set_my_party")
-async def set_my_party(botev: BotEvent):
+@register_tool("一键编队", "set_my_party2")
+async def set_my_party_multi(botev: BotEvent):
+    raw_msg = await botev.message_raw()
     msg = await botev.message()
     party_start_num = 1
     tab_start_num = 1
-    set_my_party_text = "自定义编队\n"
     try:
         tab_start_num = int(msg[0])
         del msg[0]
@@ -891,33 +1058,55 @@ async def set_my_party(botev: BotEvent):
         del msg[0]
     except:
         pass
-    units = []
-    unknown_units = []
-    for _ in range(5):
-        try:
-            unit_name = msg[0]
-            unit = get_id_from_name(unit_name)
-            if unit:
-                units.append(unit)
-            else:
-                unknown_units.append(unit_name)
-            del msg[0]
-        except:
-            pass
-    if unknown_units:
-        await botev.finish(f"未知昵称{', '.join(unknown_units)}")
-    if not units:
-        await botev.finish("未指定任何角色")
-    if len(units) < 5:
-        await botev.finish("需要5个角色")
-    set_my_party_text += "\n".join(f"{unit * 100 + 1}\t{db.get_unit_name(unit*100+1)}\t1\t{6 if unit*100+1 in db.unit_to_pure_memory else 5}" for unit in units)
+
+    teams_text = recover_text_by_tokens(raw_msg, msg)
     config = {
-        "tab_start_num": tab_start_num,
-        "party_start_num": party_start_num,
-        "set_my_party_text": set_my_party_text,
+        "tab_start_num2": tab_start_num,
+        "party_start_num2": party_start_num,
+        "set_my_party_text2": teams_text,
     }
+    del msg[:]
     return config
 
 # @register_tool("获取导入", "get_library_import_data")
 # async def get_library_import(botev: BotEvent):
     # return {}
+
+@sv.on_prefix(f"{prefix}识图")
+@wrap_hoshino_event
+async def ocr_team(botev: BotEvent):
+    try:
+        from hoshino.modules.priconne.arena import getBox, get_pic
+    except ImportError:
+        try:
+            from hoshino.modules.priconne.arena.old_main import getBox, get_pic
+        except ImportError:
+            await botev.finish("未安装怎么拆截图版，无法使用识图")
+            return
+
+    img_urls = await botev.image()
+    if not img_urls:
+        await botev.finish("未识别到图片!")
+
+    result = []
+    for id, img_url in enumerate(img_urls):
+        try:
+            image = Image.open(BytesIO(await get_pic(img_url)))
+        except Exception as e:
+            await botev.send(f"图片{id+1}下载失败: {e}")
+            continue
+        box, s = await getBox(image)
+        await botev.send(f"图片{id+1}识别结果: {s}")
+        if not box:
+            await botev.send(f"图片{id+1}未识别到任何队伍！")
+            continue
+        result += box
+
+    if not result:
+        await botev.finish("未识别到任何队伍！")
+
+    msg = f"{prefix}一键编队 1 1\n" + "\n".join(
+            f"队伍{id} {' '.join(db.get_unit_name(uid * 100 + 1) for uid in team)}"
+            for id, team in enumerate(result)
+    )
+    await botev.finish(msg)

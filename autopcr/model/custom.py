@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import IntEnum
 from ..db.models import UnitStatusCoefficient
 from .enums import eInventoryType, eParamType
 from typing import List, Optional, Tuple, Counter as CounterType, Union
@@ -31,6 +32,26 @@ class UnitAttribute:
     energy_reduce_rate: Decimal = Decimal(0)
     accuracy: Decimal = Decimal(0)
 
+    index2ch = {
+        eParamType.HP: "血量",
+        eParamType.ATK: "物攻",
+        eParamType.MAGIC_ATK: "魔攻",
+        eParamType.DEF: "物防",
+        eParamType.MAGIC_DEF: "魔防",
+        eParamType.PHYSICAL_CRITICAL: "物爆",
+        eParamType.MAGIC_CRITICAL: "法爆",
+        eParamType.WAVE_HP_RECOVERY: "wave_hp_recovery",
+        eParamType.WAVE_ENERGY_RECOVERY: "wave_energy_recovery",
+        eParamType.DODGE: "闪避",
+        eParamType.PHYSICAL_PENETRATE: "物贯",
+        eParamType.MAGIC_PENETRATE: "法贯",
+        eParamType.LIFE_STEAL: "吸血",
+        eParamType.HP_RECOVERY_RATE: "hp_recovery_rate",
+        eParamType.ENERGY_RECOVERY_RATE: "物爆提升",
+        eParamType.ENERGY_REDUCE_RATE: "法爆提升",
+        eParamType.ACCURACY: "命中"
+    }
+
     index2name = {
         eParamType.HP: "hp",
         eParamType.ATK: "atk",
@@ -51,6 +72,27 @@ class UnitAttribute:
         eParamType.ACCURACY: "accuracy"
     }
 
+    is_present = {
+        "hp": True,
+        "atk": True,
+        "magic_str": True,
+        "def_": True,
+        "magic_def": True,
+        "physical_critical": True,
+        "magic_critical": True,
+        "wave_hp_recovery": False,
+        "wave_energy_recovery": False,
+        "dodge": False,
+        "physical_penetrate": False,
+        "magic_penetrate": False,
+        "life_steal": False,
+        "hp_recovery_rate": False,
+        "energy_recovery_rate": False,
+        "energy_reduce_rate": False,
+        "accuracy": False,
+    }
+
+
     def __add__(self, oth: UnitAttribute):
         return UnitAttribute(**{key: getattr(self, key) + getattr(oth, key) for key in self.__annotations__})
 
@@ -59,10 +101,29 @@ class UnitAttribute:
             setattr(self, key, getattr(self, key) + getattr(oth, key))
         return self
 
+    def __sub__(self, oth: UnitAttribute):
+        return UnitAttribute(**{key: getattr(self, key) - getattr(oth, key) for key in self.__annotations__})
+
+    def __isub__(self, oth: UnitAttribute):
+        for key in self.__annotations__:
+            setattr(self, key, getattr(self, key) - getattr(oth, key))
+        return self
+
     def __mul__(self, oth: Union[int, float, Decimal]):
         if not isinstance(oth, Decimal):
             oth = Decimal(str(oth))
         return UnitAttribute(**{key: getattr(self, key) * oth for key in self.__annotations__})
+
+    def ex_equipment_mul(self, oth: 'UnitAttribute'):
+        ret = UnitAttribute()
+        for key in self.__annotations__:
+            base = getattr(self, key)
+            bonus = getattr(oth, key)
+            if UnitAttribute.is_present[key]:
+                setattr(ret, key, base * bonus / Decimal(10000))
+            else:
+                setattr(ret, key, bonus)
+        return ret
 
     def round(self):
         ret = UnitAttribute()
@@ -80,7 +141,7 @@ class UnitAttribute:
     def load(data: object, pre: str = '', suf: str = '') -> UnitAttribute:
         ret = UnitAttribute()
         for key in ret.__annotations__:
-            target = (pre + key.strip('_') + suf) if suf else key
+            target = (pre + key.strip('_') + suf) if suf or pre else key
             setattr(ret, key, Decimal(str(getattr(data, target, 0))))
         return ret
 
@@ -198,6 +259,26 @@ class ArenaQueryResponse(BaseModel):
     data: Optional[ArenaQueryData]
     version: str
 
+class eRedeemUnitUnlockCondition(IntEnum):
+    NONE = 0
+    UNLOCK_UNIT = 1
+    VIEWED_STORY = 2
+    GOLD = 3
+    CURRENCY = 4
+    MEMORY_PIECE = 5
+    SUPER_MEMORY_PIECE = 6
+    JEWEL = 7
+    EQUIP = 8
+    EQUIP_MATERIAL = 9
+
 class TalentQuestData(BaseModel):
     talent_id: int = None
     clear_count: int = None
+
+class eDifficulty(IntEnum):
+    NONE = 0
+    NORMAL = 1
+    HARD = 2
+    VERY_HARD = 3
+    EXTREME = 4
+

@@ -474,6 +474,7 @@ class LoadIndexResponse(responses.LoadIndexResponse):
         mgr.tower_status = self.tower_status
         mgr.campaign_list = self.campaign_list
         mgr.dispatch_units = self.dispatch_units
+        mgr.princess_knight_info = self.princess_knight_info
 
 @handles
 class HomeIndexResponse(responses.HomeIndexResponse):
@@ -507,6 +508,8 @@ class HomeIndexResponse(responses.HomeIndexResponse):
                 v.talent_id: v for v in self.talent_quest_area_info
             }
             mgr.cleared_talent_quest_ids = {db.get_talent_id_from_quest_id(qid): qid for qid in self.cleared_talent_quest_id_list}
+            mgr.alces_appear_story_flag = self.alces_appear_story_flag
+            mgr.alces_receive_tutorial_item_flag = self.alces_receive_tutorial_item_flag
 
         mgr.ready = True
 
@@ -725,10 +728,63 @@ class SeasonPassRewardAcceptResponse(responses.SeasonPassRewardAcceptResponse):
 class SeasonPassMissionAcceptResponse(responses.SeasonPassMissionAcceptResponse):
     async def update(self, mgr: datamgr, request):
         if self.rewards:
-            for reward in self.rewards:
+            for reward in self.rewards[::-1]:
                 mgr.update_inventory(reward)
         if self.exchange_rewards:
             for reward in self.exchange_rewards:
+                mgr.update_inventory(reward)
+
+@handles
+class SubStoryAbdReadStoryResponse(responses.SubStoryAbdReadStoryResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_info:
+            for reward in self.reward_info:
+                mgr.update_inventory(reward)
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
+
+@handles
+class SubStoryTprRegisterSuccessResponse(responses.SubStoryTprRegisterSuccessResponse):
+    async def update(self, mgr: datamgr, request):
+        for reward in self.reward_info or []:
+            mgr.update_inventory(reward)
+        if self.unlock_sub_story_info_list:
+            for sub_story in self.unlock_sub_story_info_list:
+                event_id = db.tpr_story_data[sub_story.sub_story_id].original_event_id
+                if event_id not in mgr.event_sub_story:
+                    mgr.event_sub_story[event_id] = datamgr.EventSubStoryData(event_id=event_id, sub_story_info_list=[])
+                find_one = next((s for s in mgr.event_sub_story[event_id].sub_story_info_list if s.sub_story_id == sub_story.sub_story_id), None)
+                if find_one:
+                    find_one.status = sub_story.status
+                else:
+                    mgr.event_sub_story[event_id].sub_story_info_list.append(sub_story)
+
+@handles
+class SubStoryTprReadStoryResponse(responses.SubStoryTprReadStoryResponse):
+    async def update(self, mgr: datamgr, request):
+        sub_story_id = request.sub_story_id
+        event_id = db.tpr_story_data[sub_story_id].original_event_id
+        sub_story_info = next((s for s in mgr.event_sub_story[event_id].sub_story_info_list if s.sub_story_id == sub_story_id), None)
+        if sub_story_info:
+            sub_story_info.status = eEventSubStoryStatus.READED
+        else:
+            mgr.event_sub_story[event_id].sub_story_info_list.append(
+                datamgr.EventSubStoryInfo(
+                    sub_story_id=sub_story_id,
+                    status=eEventSubStoryStatus.READED
+                )
+            )
+
+@handles
+class SubStoryApgReadStoryResponse(responses.SubStoryApgReadStoryResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_info:
+            for reward in self.reward_info:
+                mgr.update_inventory(reward)
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
+        if self.special_reward_list:
+            for reward in self.special_reward_list:
                 mgr.update_inventory(reward)
 
 @handles
@@ -738,6 +794,17 @@ class SubStoryAisReadStoryResponse(responses.SubStoryAisReadStoryResponse):
             for reward in self.reward_info:
                 mgr.update_inventory(reward)
 
+@handles
+class SubStoryLssReadStoryResponse(responses.SubStoryLssReadStoryResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_info:
+            for reward in self.reward_info:
+                mgr.update_inventory(reward)
+        if self.special_reward_list:
+            for reward in self.special_reward_list:
+                mgr.update_inventory(reward)
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
 @handles
 class SubStoryNydReadStoryResponse(responses.SubStoryNydReadStoryResponse):
     async def update(self, mgr: datamgr, request):
@@ -1207,15 +1274,124 @@ class TalentQuestSkipResponse(responses.TalentQuestSkipResponse):
 
 
 @handles
-class TalentQuestRecoverChallengeResponse(
-    responses.TalentQuestRecoverChallengeResponse
-):
+class TalentQuestRecoverChallengeResponse(responses.TalentQuestRecoverChallengeResponse):
     async def update(self, mgr: datamgr, request: TalentQuestRecoverChallengeRequest):
         mgr.jewel = self.user_jewel
         mgr.talent_quest_area_info[
             self.user_talent_quest.talent_id
         ].daily_recovery_count = self.user_talent_quest.daily_recovery_count
 
+@handles
+class AbyssTopResponse(responses.AbyssTopResponse):
+    async def update(self, mgr: datamgr, request):
+        mgr.cleared_abyss_quests = set(self.clear_quest_list) if self.clear_quest_list else set()
+        mgr.abyss_quest_info = {d.quest_id: d for d in self.daily_clear_count_list} if self.daily_clear_count_list else {}
+
+@handles
+class AbyssQuestSkipMultipleResponse(responses.AbyssQuestSkipMultipleResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.quest_result_list:
+            for result_list in self.quest_result_list:
+                for quest_result in result_list.quest_result:
+                    for item in quest_result.reward_list:
+                        mgr.update_inventory(item)
+        if self.bonus_reward_list:
+            for item in self.bonus_reward_list:
+                mgr.update_inventory(item)
+        if self.user_gold:
+            mgr.gold = self.user_gold
+        if self.item_list:
+            for item in self.item_list:
+                mgr.update_inventory(item)
+        if self.user_stamina_info:
+            mgr.stamina = self.user_stamina_info.user_stamina
+            mgr.stamina_full_recovery_time = self.user_stamina_info.stamina_full_recovery_time
+        if self.level_info:
+            mgr.team_level = self.level_info.team.start_level
+
+@handles
+class AbyssBossSkipResponse(responses.AbyssBossSkipResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_list:
+            for item in self.reward_list:
+                mgr.update_inventory(item)
+        if self.challenge_reward_list:
+            for item in self.challenge_reward_list:
+                mgr.update_inventory(item)
+        if self.score_reward_list:
+            for score_reward in self.score_reward_list:
+                for item in score_reward.reward_list:
+                    mgr.update_inventory(item)
+        if self.item_list:
+            for item in self.item_list:
+                mgr.update_inventory(item)
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
+        if self.user_gold:
+            mgr.gold = self.user_gold
+
+@handles
+class MirageNemesisSkipMultipleResponse(responses.MirageNemesisSkipMultipleResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.drop_reward_list:
+            for item in self.drop_reward_list:
+                mgr.update_inventory(item)
+        if self.item_list:
+            for item in self.item_list:
+                mgr.update_inventory(item)
+        if self.user_gold:
+            mgr.gold = self.user_gold
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
+
+@handles
+class MirageReceiveRewardResponse(responses.MirageReceiveRewardResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_info:
+            for item in self.reward_info:
+                mgr.update_inventory(item)
+        if self.user_gold:
+            mgr.gold = self.user_gold
+        if self.user_jewel:
+            mgr.jewel = self.user_jewel
+
+@handles
+class AlcesReceiveTutorialItemResponse(responses.AlcesReceiveTutorialItemResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_list:
+            for item in self.reward_list:
+                mgr.update_inventory(item)
+        if self.alces_ex_equip:
+            mgr.ex_equips.update({ex_equip.serial_id: ex_equip for ex_equip in self.alces_ex_equip})
+        mgr.alces_receive_tutorial_item_flag = 1
+
+@handles
+class AlcesReadStoryResponse(responses.AlcesReadStoryResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.reward_list:
+            for item in self.reward_list:
+                mgr.update_inventory(item)
+        mgr.alces_appear_story_flag = 0
+
+@handles
+class AlcesExecResponse(responses.AlcesExecResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.current_alces_point:
+            mgr.update_inventory(self.current_alces_point)
+        if self.user_gold:
+            mgr.gold = self.user_gold
+
+@handles
+class AlcesFixResultResponse(responses.AlcesFixResultResponse):
+    async def update(self, mgr: datamgr, request):
+        mgr.ex_equips[self.fixed_alces_data.serial_id] = self.fixed_alces_data
+
+@handles
+class AlcesLockSlotResponse(responses.AlcesLockSlotResponse):
+    async def update(self, mgr: datamgr, request):
+        if self.alces_data_list:
+            for data in self.alces_data_list:
+                mgr.ex_equips[data.serial_id].sub_status = data.sub_status
 
 # 菜 就别玩
 # def custom_dict(self, *args, **kwargs):
